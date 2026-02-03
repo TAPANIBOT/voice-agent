@@ -1,0 +1,225 @@
+# Voice Agent Configuration
+# Security Level: 3 (HIGH)
+
+agent:
+  name: "voice-agent"
+  version: "2.0.0"
+  description: "AI voice calls with Telnyx + Deepgram STT + ElevenLabs TTS + Streaming Pipeline"
+  capabilities:
+    - "start_call"
+    - "respond"
+    - "hangup"
+    - "transfer"
+    - "list_calls"
+    - "get_history"
+
+security:
+  level: 3  # HIGH
+  
+  network:
+    allowed_domains:
+      - "api.telnyx.com"
+      - "api.elevenlabs.io"
+      - "api.deepgram.com"
+      # WebSocket endpoints
+      - "wss://api.telnyx.com"
+      - "wss://api.elevenlabs.io"  
+      - "wss://api.deepgram.com"
+    block_private_ips: false  # Needs localhost for callback
+  
+  filesystem:
+    readonly: true
+    allowed_paths:
+      read:
+        - "/app"
+        - "/tmp"
+      write:
+        - "/tmp"
+        - "/var/log/agent"
+  
+  rate_limit:
+    requests_per_minute: 60
+    requests_per_hour: 1000
+
+api:
+  host: "0.0.0.0"
+  port: 8080
+  websocket_port: 8081
+  max_request_size: "1MB"
+  timeout_seconds: 30
+
+# Voice settings
+voice:
+  tts:
+    provider: "elevenlabs"
+    model: "eleven_flash_v2_5"  # Low latency model
+    output_format: "ulaw_8000"  # μ-law 8kHz for telephony
+    settings:
+      stability: 0.5
+      similarity_boost: 0.8
+      style: 0.0
+      use_speaker_boost: true
+    
+  stt:
+    provider: "deepgram"
+    model: "nova-3"
+    language: "fi"  # Finnish
+    settings:
+      smart_format: true
+      punctuate: true
+      interim_results: true
+      endpointing: 300  # ms - when to consider speech ended
+      utterance_end_ms: 1000
+      vad_events: true
+    
+  # Turn-taking configuration (when does the agent start speaking?)
+  turn_taking:
+    # Base wait time after user stops speaking
+    wait_seconds: 0.3
+    # Shorter wait if sentence ends with punctuation
+    on_punctuation_seconds: 0.1
+    # Longer wait if no clear ending
+    on_no_punctuation_seconds: 1.2
+    # Extra wait for number sequences (user might be reading)
+    on_number_seconds: 1.5
+    # Allow user to interrupt agent
+    barge_in_enabled: true
+    # Minimum speech duration to trigger response
+    min_speech_duration_ms: 200
+
+# Telephony settings  
+telephony:
+  primary_provider: "telnyx"  # Primary provider (telnyx or twilio)
+  failover_enabled: false  # Enable automatic failover to secondary provider
+  
+  # Telnyx configuration
+  telnyx:
+    codec: "PCMU"  # μ-law 8kHz mono
+    sample_rate: 8000
+    channels: 1
+    stream_track: "both_tracks"  # inbound + outbound
+    bidirectional_mode: "rtp"
+    
+  # Twilio configuration
+  twilio:
+    webhook_url: "https://yourdomain.com/webhook/twilio"  # Will be set via .env
+    from_number: "+358123456789"  # Will be set via .env
+    account_sid: "your_account_sid"  # Will be set via .env
+    auth_token: "your_auth_token"  # Will be set via .env
+
+# Call restrictions
+calls:
+  max_duration_seconds: 600  # 10 minutes max
+  max_concurrent: 5
+  
+  # Allowed destinations (glob patterns)
+  allowed_destinations:
+    - "+358*"  # Finland only
+  
+  # Blocked prefixes (premium numbers etc)
+  blocked_prefixes:
+    - "+3581"   # Premium rate
+    - "+35890"  # Service numbers
+  
+  # Auto-hangup triggers
+  auto_hangup:
+    on_silence_seconds: 30
+    on_error: true
+    on_timeout: true
+
+# Conversation settings
+conversation:
+  # System prompt for Claude
+  default_context: |
+    Olet Tapani, ystävällinen suomenkielinen puhelinassistentti.
+    Pidä vastaukset lyhyinä ja selkeinä (max 2-3 lausetta).
+    Jos et ymmärrä, pyydä toistamaan.
+    
+  # Max history to keep per call
+  max_history_turns: 20
+  
+  # Sentiment thresholds
+  sentiment:
+    angry_threshold: 0.7
+    confused_threshold: 0.6
+
+# Streaming configuration (V2.0)
+streaming:
+  # Enable streaming pipeline (STT → LLM → TTS concurrent)
+  llm_streaming_enabled: true
+  llm_provider: "anthropic"
+  llm_model: "claude-3-7-sonnet-20250219"
+  llm_max_tokens: 150
+  llm_temperature: 0.7
+  stream_chunk_size: 512  # Chars to buffer before sending to TTS
+  
+  # TTS streaming mode
+  tts_websocket_mode: true  # Use WebSocket for real-time TTS
+  
+  # Latency targets
+  target_total_latency_ms: 800
+  target_first_token_ms: 300
+  target_first_audio_ms: 250
+
+# Interruption configuration (V2.0)
+interruption:
+  # Enable barge-in capability
+  enabled: true
+  
+  # VAD sensitivity (0.0-1.0, higher = more sensitive)
+  vad_sensitivity: 0.7
+  
+  # Minimum speech duration to consider valid (ms)
+  min_speech_duration_ms: 200
+  
+  # Target latency for stopping playback (ms)
+  stop_latency_target_ms: 150
+  
+  # Debounce delay to reduce false positives (ms)
+  debounce_ms: 50
+  
+  # Require confident speech detection
+  require_confident_speech: true
+
+# Retry policy (V2.0)
+retry_policy:
+  max_attempts: 3
+  initial_backoff_ms: 100
+  max_backoff_ms: 2000
+  exponential_base: 2
+
+# Circuit breaker (V2.0)
+circuit_breaker:
+  failure_threshold: 5  # Failures before opening circuit
+  success_threshold: 2  # Successes to close circuit
+  timeout_seconds: 30  # Time before trying again
+
+# Logging
+logging:
+  level: "INFO"
+  format: "json"
+  destination: "/var/log/agent/voice-agent.log"
+  
+  # Log these events
+  events:
+    - "call.started"
+    - "call.ended"
+    - "transcript.received"
+    - "response.sent"
+    - "error"
+  
+  # Don't log these (privacy)
+  redact:
+    - "transcript"  # Redact actual speech content in logs
+    - "phone_number"  # Partial redaction
+
+# Metrics (optional)
+metrics:
+  enabled: true
+  endpoint: "/metrics"
+  include:
+    - "calls_total"
+    - "call_duration_seconds"
+    - "stt_latency_ms"
+    - "tts_latency_ms"
+    - "total_latency_ms"
