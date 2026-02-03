@@ -35,8 +35,8 @@ import structlog
 # Add lib to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'lib'))
 
-from telnyx_client import TelnyxClient
-from twilio_provider import TwilioProvider
+from lib.telephony.factory import create_provider
+from lib.telephony.base import TelephonyProvider
 from deepgram_client import DeepgramClient
 from elevenlabs_client import ElevenLabsClient
 from conversation import ConversationManager
@@ -61,11 +61,10 @@ def load_config():
 config = load_config()
 
 # Initialize clients (lazy, on first use)
-telnyx_client: Optional[TelnyxClient] = None
+provider: Optional[TelephonyProvider] = None
 deepgram_client: Optional[DeepgramClient] = None
 elevenlabs_client: Optional[ElevenLabsClient] = None
 conversation_manager: Optional[ConversationManager] = None
-twilio_provider: Optional[TwilioProvider] = None
 audio_pipeline: Optional[AudioPipeline] = None
 humanlike_behavior: Optional[HumanlikeBehavior] = None
 
@@ -91,16 +90,13 @@ SECURITY_NOTICE = (
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown handlers."""
-    global telnyx_client, deepgram_client, elevenlabs_client, conversation_manager
+    global provider, deepgram_client, elevenlabs_client, conversation_manager
     
     logger.info("voice_agent.starting", version=config['agent']['version'])
     
     # Initialize clients
-    telnyx_client = TelnyxClient(
-        api_key=os.environ['TELNYX_API_KEY'],
-        phone_number=os.environ['TELNYX_PHONE_NUMBER'],
-        connection_id=os.environ['TELNYX_CONNECTION_ID']
-    )
+    provider = create_provider()
+    await provider.initialize()
     
     deepgram_client = DeepgramClient(
         api_key=os.environ['DEEPGRAM_API_KEY'],
@@ -114,14 +110,6 @@ async def lifespan(app: FastAPI):
     )
     
     conversation_manager = ConversationManager(config['conversation'])
-    
-    # Initialize Twilio client
-    global twilio_provider
-    twilio_provider = TwilioProvider({
-        "account_sid": os.environ.get("TWILIO_ACCOUNT_SID", ""),
-        "auth_token": os.environ.get("TWILIO_AUTH_TOKEN", ""),
-        "from_number": os.environ.get("TWILIO_PHONE_NUMBER", "")
-    })
     
     # Initialize new modules
     global audio_pipeline, humanlike_behavior
@@ -138,7 +126,7 @@ async def lifespan(app: FastAPI):
     # Hang up any active calls
     for call_id in list(active_calls.keys()):
         try:
-            await telnyx_client.hangup(call_id)
+            await provider.hangup_call(call_id)
         except Exception as e:
             logger.error("voice_agent.cleanup_error", call_id=call_id, error=str(e))
     
@@ -182,27 +170,11 @@ def error_response(code: str, message: str, details: Optional[dict] = None) -> d
 
 def verify_telnyx_signature(request: Request, body: bytes) -> bool:
     """Verify Telnyx webhook signature."""
-    secret = os.environ.get('TELNYX_WEBHOOK_SECRET', '')
-    if not secret:
-        logger.warning("voice_agent.no_webhook_secret")
-        return True  # Skip verification in dev
-    
-    signature = request.headers.get('telnyx-signature-ed25519', '')
-    timestamp = request.headers.get('telnyx-timestamp', '')
-    
-    if not signature or not timestamp:
-        return False
-    
-    # Telnyx uses ed25519 signatures
-    # For simplicity, we'll verify timestamp freshness
     try:
-        ts = int(timestamp)
-        if abs(time.time() - ts) > 300:  # 5 min tolerance
-            return False
-    except ValueError:
+        return provider.validate_signature(request, body, "telnyx")
+    except Exception as e:
+        logger.error("voice_agent.telnyx_signature_validation_failed", error=str(e))
         return False
-    
-    return True  # Full signature verification would use ed25519
 
 
 def is_destination_allowed(phone_number: str) -> bool:
@@ -419,13 +391,14 @@ async def action_start_call(params: dict, background_tasks: BackgroundTasks):
         # Process context with HumanlikeBehavior
         processed_context = humanlike_behavior.process_context(context)
         
-        # Initiate call via Telnyx
-        call_data = await telnyx_client.dial(
+        # Initiate call via provider
+        call_data = await provider.start_outbound_call(
             to=to_number,
+            from_=os.environ['TELNYX_PHONE_NUMBER'],
             webhook_url=f"{os.environ.get('PUBLIC_URL', '')}/webhook/telnyx"
         )
         
-        call_id = call_data['call_control_id']
+        call_id = call_data['call_id']
         
         # Track call
         active_calls[call_id] = {
@@ -503,8 +476,8 @@ async def action_respond(params: dict):
         # Process audio through pipeline
         processed_audio = await audio_pipeline.process_audio(call_id, audio_data)
         
-        # Send audio to Telnyx call
-        await telnyx_client.play_audio(call_id, processed_audio)
+        # Send audio to call
+        await provider.play_audio(call_id, processed_audio)
         
         # Track turn
         active_calls[call_id]['turns'].append({
@@ -558,7 +531,7 @@ async def action_hangup(params: dict):
         # Record start time for latency tracking
         start_time = time.time()
         
-        await telnyx_client.hangup(call_id)
+        await provider.hangup_call(call_id)
         
         # Calculate duration
         started = active_calls[call_id].get('started_at')
@@ -625,7 +598,7 @@ async def action_transfer(params: dict):
         )
     
     try:
-        await telnyx_client.transfer(call_id, to_number)
+        await provider.transfer_call(call_id, to_number)
         
         active_calls[call_id]['status'] = 'transferred'
         
@@ -718,9 +691,11 @@ async def telnyx_webhook(request: Request, background_tasks: BackgroundTasks):
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="Invalid JSON")
     
-    event_type = data.get('data', {}).get('event_type', '')
-    payload = data.get('data', {}).get('payload', {})
-    call_id = payload.get('call_control_id')
+    # Parse webhook using provider
+    event = provider.parse_webhook(data)
+    event_type = event.get('event_type', '')
+    payload = event.get('payload', {})
+    call_id = event.get('call_id')
     
     logger.info("voice_agent.webhook_received", event_type=event_type, call_id=call_id)
     
@@ -806,21 +781,9 @@ async def twilio_webhook(request: Request, background_tasks: BackgroundTasks):
     
     body = await request.body()n
     
-    # Verify Twilio signature
+    # Verify Twilio signature using provider
     try:
-        if not twilio_client:
-            logger.error("voice_agent.twilio_client_not_initialized")
-            raise HTTPException(status_code=500, detail="Twilio client not initialized")
-        
-        # Use the global twilio_client for signature validation
-        from lib.twilio_provider import TwilioProvider
-        twilio_provider = TwilioProvider({
-            "account_sid": os.environ['TWILIO_ACCOUNT_SID'],
-            "auth_token": os.environ['TWILIO_AUTH_TOKEN'],
-            "from_number": os.environ['TWILIO_PHONE_NUMBER']
-        })
-        
-        if not twilio_provider._validate_twilio_signature(request, body):
+        if not provider.validate_signature(request, body, "twilio"):
             logger.warning("voice_agent.invalid_twilio_signature")
             raise HTTPException(status_code=401, detail="Invalid signature")
     except Exception as e:
@@ -833,14 +796,15 @@ async def twilio_webhook(request: Request, background_tasks: BackgroundTasks):
         logger.error("voice_agent.twilio_webhook_parse_failed", error=str(e))
         raise HTTPException(status_code=400, detail="Invalid request format")
     
-    # Extract call SID (Twilio's call identifier)
-    call_sid = data.get('CallSid')
+    # Parse webhook using provider
+    event = provider.parse_twilio_webhook(data)
+    call_sid = event.get('call_id')
     if not call_sid:
         logger.warning("voice_agent.twilio_webhook_no_call_sid")
         raise HTTPException(status_code=400, detail="Missing CallSid")
     
     # Extract event type from Twilio's CallStatus
-    call_status = data.get('CallStatus', '')
+    call_status = event.get('status', '')
     
     logger.info("voice_agent.twilio_webhook_received", call_sid=call_sid, status=call_status)
     
@@ -928,7 +892,7 @@ async def start_media_streaming(call_id: str):
             return
             
         # Initialize audio pipeline for this call
-        audio_pipeline.start_streaming(call_id)
+        await provider.start_media_streaming(call_id)
         
         logger.info("voice_agent.media_streaming_started", call_id=call_id)
         
