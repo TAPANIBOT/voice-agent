@@ -1,65 +1,51 @@
-# Agent: voice-agent
+# Tapani Voice Agent — Pipecat WebRTC + Deepgram + OpenAI TTS
 # Security Level: 3 (HIGH)
-# Purpose: AI voice calls with Telnyx + Deepgram STT + ElevenLabs TTS
 
-FROM python:3.11-slim
+FROM python:3.12-slim
 
-# Metadata
 LABEL agent.name="voice-agent"
-LABEL agent.version="1.0.0"
+LABEL agent.version="2.0.0"
 LABEL agent.security_level="3"
 LABEL agent.port="8302"
 
-# Security: Update packages and install dependencies
+# System dependencies (libxcb etc. needed by OpenCV which pipecat webrtc pulls in)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         curl \
         ca-certificates \
-        gcc \
-        python3-dev \
-        libffi-dev \
-        libssl-dev && \
+        libxcb1 \
+        libgl1 \
+        libglib2.0-0 && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Working directory
 WORKDIR /app
 
-# Copy shared libraries
-COPY lib/ ./lib/
-
-# Install Python dependencies
+# Install Python dependencies first (cache layer)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Remove build tools after install (security)
-RUN apt-get purge -y gcc python3-dev libffi-dev libssl-dev && \
-    apt-get autoremove -y && \
-    apt-get clean
+# Pre-download NLTK data (read-only filesystem needs this baked in)
+ENV NLTK_DATA=/app/nltk_data
+RUN mkdir -p /app/nltk_data && \
+    python -c "import nltk; nltk.download('punkt_tab', download_dir='/app/nltk_data')" || true
 
-# Copy agent code
-COPY api_server.py .
-COPY websocket_server.py .
-COPY config.yaml .
-COPY scripts/ ./scripts/
+# Copy application code
+COPY config.py .
+COPY bot.py .
+COPY server.py .
 
-# Create non-root user
+# Non-root user
 RUN useradd -m -u 1000 voice-agent && \
     chown -R voice-agent:voice-agent /app && \
     mkdir -p /var/log/agent && \
     chown voice-agent:voice-agent /var/log/agent
 
-# Switch to non-root user
 USER voice-agent
 
-# Healthcheck
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD curl -f http://localhost:8080/health || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD curl -f http://localhost:8302/health || exit 1
 
-# Expose ports
-# 8080 = HTTP API
-# 8081 = WebSocket (internal, Telnyx media stream)
-EXPOSE 8080 8081
+EXPOSE 8302
 
-# Start servers
-CMD ["python", "api_server.py"]
+CMD ["python", "server.py"]

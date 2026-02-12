@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>fi.skycode.voice-agent</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/tapani/voice-agent/.venv/bin/python</string>
+        <string>/Users/tapani/voice-agent/server.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/tapani/voice-agent</string>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/voice-agent.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/tmp/voice-agent.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/tapani/voice-agent/.venv/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>

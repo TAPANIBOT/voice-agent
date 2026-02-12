@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="fi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tapani — Puheassistentti</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+            background: #0f172a;
+            color: #e2e8f0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+        }
+        .container {
+            text-align: center;
+            max-width: 400px;
+            padding: 2rem;
+        }
+        h1 {
+            font-size: 1.5rem;
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+        }
+        .subtitle {
+            color: #94a3b8;
+            font-size: 0.9rem;
+            margin-bottom: 2rem;
+        }
+        #callBtn {
+            width: 100px;
+            height: 100px;
+            border-radius: 50%;
+            border: none;
+            background: #2563eb;
+            color: white;
+            font-size: 2.5rem;
+            cursor: pointer;
+            transition: background 0.2s, transform 0.1s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 1.5rem;
+        }
+        #callBtn:hover { background: #1d4ed8; transform: scale(1.05); }
+        #callBtn:active { transform: scale(0.95); }
+        #callBtn.active {
+            background: #dc2626;
+            animation: pulse 2s infinite;
+        }
+        #callBtn.connecting {
+            background: #f59e0b;
+            animation: pulse 1s infinite;
+        }
+        #callBtn:disabled {
+            background: #475569;
+            cursor: not-allowed;
+            animation: none;
+        }
+        @keyframes pulse {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(37, 99, 235, 0.4); }
+            50% { box-shadow: 0 0 0 15px rgba(37, 99, 235, 0); }
+        }
+        #callBtn.active {
+            animation-name: pulse-red;
+        }
+        @keyframes pulse-red {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.4); }
+            50% { box-shadow: 0 0 0 15px rgba(220, 38, 38, 0); }
+        }
+        #status {
+            font-size: 0.95rem;
+            color: #94a3b8;
+            min-height: 1.5em;
+        }
+        #status.error { color: #f87171; }
+        #status.connected { color: #4ade80; }
+        #debug {
+            margin-top: 2rem;
+            text-align: left;
+            font-size: 0.75rem;
+            color: #64748b;
+            max-height: 200px;
+            overflow-y: auto;
+            background: #1e293b;
+            border-radius: 8px;
+            padding: 0.75rem;
+            display: none;
+        }
+        #debug.visible { display: block; }
+        .toggle-debug {
+            margin-top: 1.5rem;
+            background: none;
+            border: 1px solid #334155;
+            color: #64748b;
+            padding: 0.3rem 0.8rem;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.75rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Tapani</h1>
+        <p class="subtitle">Jussin tekoalyavustaja</p>
+
+        <button id="callBtn" title="Soita Tapanille">&#128222;</button>
+        <p id="status">Paina soittaaksesi</p>
+
+        <audio id="remoteAudio" autoplay></audio>
+
+        <button class="toggle-debug" onclick="toggleDebug()">Debug</button>
+        <div id="debug"></div>
+    </div>
+
+    <script>
+    const callBtn = document.getElementById('callBtn');
+    const statusEl = document.getElementById('status');
+    const debugEl = document.getElementById('debug');
+    const audioEl = document.getElementById('remoteAudio');
+
+    let pc = null;
+    let pcId = null;
+    let localStream = null;
+
+    function log(msg) {
+        const ts = new Date().toLocaleTimeString('fi-FI');
+        debugEl.textContent += `[${ts}] ${msg}\n`;
+        debugEl.scrollTop = debugEl.scrollHeight;
+        console.log(`[VoiceAgent] ${msg}`);
+    }
+
+    function setStatus(text, className) {
+        statusEl.textContent = text;
+        statusEl.className = className || '';
+    }
+
+    function toggleDebug() {
+        debugEl.classList.toggle('visible');
+    }
+
+    callBtn.addEventListener('click', async () => {
+        if (pc) {
+            hangup();
+        } else {
+            await startCall();
+        }
+    });
+
+    async function startCall() {
+        callBtn.classList.add('connecting');
+        callBtn.disabled = true;
+        setStatus('Yhdistetaan...');
+        log('Starting call...');
+
+        try {
+            // 1. Get ICE servers from /start
+            const startResp = await fetch('/start', { method: 'POST' });
+            const startData = await startResp.json();
+            const offerUrl = startData.webrtcUrl;
+            const iceServers = startData.iceServers || [];
+
+            log(`Got ${iceServers.length} ICE server(s)`);
+            iceServers.forEach(s => log(`  ICE: ${s.urls}`));
+
+            // 2. Get microphone access
+            localStream = await navigator.mediaDevices.getUserMedia({
+                audio: {
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                    autoGainControl: true,
+                },
+                video: false,
+            });
+            log('Microphone access granted');
+
+            // 3. Create RTCPeerConnection with TURN servers
+            const rtcConfig = { iceServers: iceServers };
+            pc = new RTCPeerConnection(rtcConfig);
+
+            // Add local audio track
+            localStream.getTracks().forEach(track => {
+                pc.addTrack(track, localStream);
+            });
+
+            // Handle remote audio
+            pc.ontrack = (event) => {
+                log(`Remote track received: ${event.track.kind}`);
+                audioEl.srcObject = event.streams[0];
+            };
+
+            // ICE connection state monitoring
+            pc.oniceconnectionstatechange = () => {
+                const state = pc.iceConnectionState;
+                log(`ICE connection: ${state}`);
+                if (state === 'connected' || state === 'completed') {
+                    callBtn.classList.remove('connecting');
+                    callBtn.classList.add('active');
+                    callBtn.disabled = false;
+                    setStatus('Yhdistetty — puhu Tapanille', 'connected');
+                } else if (state === 'failed') {
+                    setStatus('Yhteys epaonnistui', 'error');
+                    hangup();
+                } else if (state === 'disconnected') {
+                    setStatus('Yhteys katkesi', 'error');
+                    hangup();
+                }
+            };
+
+            // ICE candidate trickle
+            const pendingCandidates = [];
+            let trickleTimer = null;
+
+            pc.onicecandidate = (event) => {
+                if (event.candidate && pcId) {
+                    pendingCandidates.push({
+                        candidate: event.candidate.candidate,
+                        sdp_mid: event.candidate.sdpMid,
+                        sdp_mline_index: event.candidate.sdpMLineIndex,
+                    });
+                    // Batch candidates — send every 100ms
+                    if (!trickleTimer) {
+                        trickleTimer = setTimeout(async () => {
+                            const batch = pendingCandidates.splice(0);
+                            if (batch.length > 0) {
+                                log(`Sending ${batch.length} ICE candidate(s)`);
+                                try {
+                                    await fetch(offerUrl, {
+                                        method: 'PATCH',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({
+                                            pc_id: pcId,
+                                            candidates: batch,
+                                        }),
+                                    });
+                                } catch (e) {
+                                    log(`ICE trickle error: ${e.message}`);
+                                }
+                            }
+                            trickleTimer = null;
+                        }, 100);
+                    }
+                }
+            };
+
+            pc.onicegatheringstatechange = () => {
+                log(`ICE gathering: ${pc.iceGatheringState}`);
+            };
+
+            // 4. Create SDP offer
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            log('SDP offer created');
+
+            // 5. Send offer to server
+            const offerResp = await fetch(offerUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    sdp: pc.localDescription.sdp,
+                    type: pc.localDescription.type,
+                }),
+            });
+
+            const answer = await offerResp.json();
+            pcId = answer.pc_id;
+            log(`SDP answer received, pc_id: ${pcId}`);
+
+            // 6. Set remote description
+            await pc.setRemoteDescription(new RTCSessionDescription({
+                sdp: answer.sdp,
+                type: answer.type,
+            }));
+            log('Remote description set');
+
+            callBtn.disabled = false;
+            setStatus('Yhdistetaan...', '');
+
+        } catch (err) {
+            log(`Error: ${err.message}`);
+            setStatus(`Virhe: ${err.message}`, 'error');
+            hangup();
+        }
+    }
+
+    function hangup() {
+        log('Hanging up');
+        if (localStream) {
+            localStream.getTracks().forEach(t => t.stop());
+            localStream = null;
+        }
+        if (pc) {
+            pc.close();
+            pc = null;
+        }
+        pcId = null;
+        audioEl.srcObject = null;
+
+        callBtn.classList.remove('active', 'connecting');
+        callBtn.disabled = false;
+        setStatus('Puhelu paattyi — paina soittaaksesi uudelleen');
+    }
+    </script>
+</body>
+</html>
